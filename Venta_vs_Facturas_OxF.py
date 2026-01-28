@@ -28,6 +28,9 @@ class Config:
 
     patron_fraude: str = r"FRAUDE"
     patron_test: str = r"TEST"
+    subcarpeta_fraude: str = "FRAUDE"
+    subcarpeta_test: str = "TEST"
+    extensiones_tickets: tuple[str, ...] = (".xlsx", ".xlsm", ".xls", ".csv")
 
     tolerancia_monto: float = 0.01
     tc_from_currency: str = "USD"
@@ -112,6 +115,87 @@ def seleccionar_archivo_tc(titulo: str) -> str:
         title=titulo,
         filetypes=(("TC files", "*.xlsx *.xlsm *.xls *.csv"),),
     )
+
+
+# ============================================================
+# 2.1) FRAUDE / TEST (document_nbr)
+# ============================================================
+def _leer_document_nbrs(path: Path) -> pd.Series:
+    if path.suffix.lower() == ".csv":
+        df = pd.read_csv(path, sep=None, engine="python", dtype={"document_nbr": str})
+    else:
+        df = pd.read_excel(path, dtype={"document_nbr": str})
+
+    require_columns(df, ["document_nbr"], f"tickets:{path.name}")
+    serie = normalize_str_series(df["document_nbr"])
+    serie = serie.replace({"": pd.NA, "nan": pd.NA, "None": pd.NA}).dropna()
+    return serie
+
+
+def cargar_documentos_fraude_test(carpeta_base: str, cfg: Config) -> pd.DataFrame:
+    base = Path(carpeta_base)
+    fraude_dir = base / cfg.subcarpeta_fraude
+    test_dir = base / cfg.subcarpeta_test
+
+    if not fraude_dir.exists() or not test_dir.exists():
+        raise FileNotFoundError(
+            "No se encontraron subcarpetas FRAUDE y TEST en: "
+            f"{carpeta_base}"
+        )
+
+    documentos: dict[str, dict[str, bool]] = {}
+    errores: list[tuple[str, str]] = []
+
+    for etiqueta, carpeta in [("FRAUDE", fraude_dir), ("TEST", test_dir)]:
+        archivos = sorted(
+            [
+                p
+                for p in carpeta.rglob("*")
+                if p.suffix.lower() in cfg.extensiones_tickets and "~$" not in p.name
+            ]
+        )
+        if not archivos:
+            print(f"⚠️ No se encontraron archivos en {carpeta}.")
+            continue
+
+        for archivo in archivos:
+            try:
+                serie = _leer_document_nbrs(archivo)
+                for doc in serie.unique():
+                    estado = documentos.setdefault(doc, {"es_fraude": False, "es_test": False})
+                    if etiqueta == "FRAUDE":
+                        estado["es_fraude"] = True
+                    else:
+                        estado["es_test"] = True
+            except Exception as exc:
+                errores.append((str(archivo), str(exc)))
+
+    if errores:
+        print("⚠️ Errores al leer algunos archivos (máx 5):")
+        for archivo, error in errores[:5]:
+            print(" -", archivo, "->", error)
+
+    df = (
+        pd.DataFrame.from_dict(documentos, orient="index")
+          .reset_index()
+          .rename(columns={"index": "document_nbr"})
+    )
+    if df.empty:
+        df = pd.DataFrame(columns=["document_nbr", "es_fraude", "es_test"])
+
+    df["flag_fraude_test"] = np.select(
+        [df["es_fraude"] & df["es_test"], df["es_fraude"], df["es_test"]],
+        ["FRAUDE|TEST", "FRAUDE", "TEST"],
+        default="",
+    )
+
+    print(
+        "ℹ️ Documentos FRAUDE/TEST | "
+        f"total_documentos={len(df):,} | "
+        f"fraude={df['es_fraude'].sum():,} | "
+        f"test={df['es_test'].sum():,}"
+    )
+    return df
 
 
 # ============================================================
@@ -259,6 +343,38 @@ def prepare_ra(df_ra_raw: pd.DataFrame) -> pd.DataFrame:
     ra["issue_date"] = pd.to_datetime(ra["issue_date"], errors="coerce")
 
     return ra
+
+
+def agregar_flags_fraude_test_ra(ra: pd.DataFrame, df_flags: pd.DataFrame) -> pd.DataFrame:
+    ra_out = ra.copy()
+    if df_flags.empty:
+        ra_out["es_fraude"] = False
+        ra_out["es_test"] = False
+        ra_out["flag_fraude_test"] = ""
+        return ra_out
+
+    fraude_set = set(
+        normalize_str_series(df_flags.loc[df_flags["es_fraude"], "document_nbr"])
+    )
+    test_set = set(
+        normalize_str_series(df_flags.loc[df_flags["es_test"], "document_nbr"])
+    )
+
+    docs = normalize_str_series(ra_out["document_nbr"])
+    ra_out["es_fraude"] = docs.isin(fraude_set)
+    ra_out["es_test"] = docs.isin(test_set)
+    ra_out["flag_fraude_test"] = np.select(
+        [ra_out["es_fraude"] & ra_out["es_test"], ra_out["es_fraude"], ra_out["es_test"]],
+        ["FRAUDE|TEST", "FRAUDE", "TEST"],
+        default="",
+    )
+
+    print(
+        "ℹ️ RA: flags FRAUDE/TEST | "
+        f"fraude={ra_out['es_fraude'].sum():,} | "
+        f"test={ra_out['es_test'].sum():,}"
+    )
+    return ra_out
 
 
 def prepare_oxf(df_oxf_raw: pd.DataFrame, cfg: Config) -> pd.DataFrame:
@@ -474,6 +590,51 @@ def normalizar_status_emision(df_union: pd.DataFrame, cfg: Config) -> pd.DataFra
     return df
 
 
+def comparar_flags_fraude_test(df_union: pd.DataFrame, cfg: Config) -> pd.DataFrame:
+    df = df_union.copy()
+
+    col_ra_fraude = f"es_fraude{cfg.suf_ra}"
+    col_ra_test = f"es_test{cfg.suf_ra}"
+    col_oxf_fraude = f"es_fraude{cfg.suf_oxf}"
+    col_oxf_test = f"es_test{cfg.suf_oxf}"
+
+    ra_fraude = df.get(col_ra_fraude)
+    ra_test = df.get(col_ra_test)
+    oxf_fraude = df.get(col_oxf_fraude)
+    oxf_test = df.get(col_oxf_test)
+
+    ra_fraude = (
+        ra_fraude.infer_objects(copy=False).fillna(False).astype(bool)
+        if ra_fraude is not None
+        else pd.Series(False, index=df.index)
+    )
+    ra_test = (
+        ra_test.infer_objects(copy=False).fillna(False).astype(bool)
+        if ra_test is not None
+        else pd.Series(False, index=df.index)
+    )
+    oxf_fraude = (
+        oxf_fraude.infer_objects(copy=False).fillna(False).astype(bool)
+        if oxf_fraude is not None
+        else pd.Series(False, index=df.index)
+    )
+    oxf_test = (
+        oxf_test.infer_objects(copy=False).fillna(False).astype(bool)
+        if oxf_test is not None
+        else pd.Series(False, index=df.index)
+    )
+
+    diff_fraude = ra_fraude.ne(oxf_fraude)
+    diff_test = ra_test.ne(oxf_test)
+
+    df["discrepancia_fraude_test"] = np.select(
+        [diff_fraude & diff_test, diff_fraude, diff_test],
+        ["DISCREPANCIA_FRAUDE|TEST", "DISCREPANCIA_FRAUDE", "DISCREPANCIA_TEST"],
+        default="",
+    )
+    return df
+
+
 def agregar_fecha_consolidada(df_union: pd.DataFrame, cfg: Config) -> pd.DataFrame:
     df = df_union.copy()
 
@@ -574,6 +735,13 @@ def ordenar_columnas_df_union(df_union: pd.DataFrame, cfg: Config) -> pd.DataFra
         f"station_name{cfg.suf_ra}",
         f"Agente{cfg.suf_ra}",
         f"accounting_country CORREGIDO{cfg.suf_ra}",
+        f"es_fraude{cfg.suf_ra}",
+        f"es_test{cfg.suf_ra}",
+        f"flag_fraude_test{cfg.suf_ra}",
+        f"es_fraude{cfg.suf_oxf}",
+        f"es_test{cfg.suf_oxf}",
+        f"flag_comentario{cfg.suf_oxf}",
+        "discrepancia_fraude_test",
 
         f"Pasajero{cfg.suf_oxf}",
         f"Monto_ASR{cfg.suf_oxf}",
@@ -600,6 +768,7 @@ def ejecutar_conciliacion(
     *,
     use_cache: bool = False,
     refresh_cache: bool = False,
+    use_fraude_test: bool = True,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     if use_cache and not refresh_cache:
         try:
@@ -631,6 +800,13 @@ def ejecutar_conciliacion(
         if use_cache or refresh_cache:
             guardar_insumos(df_ra_raw, df_oxf_raw, tc, cfg)
 
+    df_fraude_test = None
+    if use_fraude_test:
+        carpeta_fraude_test = seleccionar_carpeta(
+            "Selecciona carpeta con subcarpetas FRAUDE y TEST"
+        )
+        df_fraude_test = cargar_documentos_fraude_test(carpeta_fraude_test, cfg)
+
     print(
         "ℹ️ Insumos RAW | "
         f"RA filas={df_ra_raw.shape[0]:,} cols={df_ra_raw.shape[1]} | "
@@ -638,6 +814,8 @@ def ejecutar_conciliacion(
     )
 
     ra = prepare_ra(df_ra_raw)
+    if df_fraude_test is not None:
+        ra = agregar_flags_fraude_test_ra(ra, df_fraude_test)
     oxf = prepare_oxf(df_oxf_raw, cfg)
     print(
         "ℹ️ Preparación completada | "
@@ -656,6 +834,7 @@ def ejecutar_conciliacion(
     df_union = add_conciliation(df_union, cfg)
     df_union = unificar_columnas_reserva_ticket(df_union, cfg)
     df_union = normalizar_status_emision(df_union, cfg)
+    df_union = comparar_flags_fraude_test(df_union, cfg)
     df_union = agregar_usd_unificado(df_union, tc, cfg)
     df_union = agregar_fecha_consolidada(df_union, cfg)
     df_union = ordenar_columnas_df_union(df_union, cfg)
