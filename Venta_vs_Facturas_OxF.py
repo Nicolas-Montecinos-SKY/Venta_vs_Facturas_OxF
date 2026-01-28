@@ -763,6 +763,10 @@ def ordenar_columnas_df_union(df_union: pd.DataFrame, cfg: Config) -> pd.DataFra
         f"Folio_final{cfg.suf_oxf}",
         f"Status Emisión{cfg.suf_oxf}",
         f"Status Emisión_NORMALIZADO{cfg.suf_oxf}",
+        f"es_fraude{cfg.suf_oxf}",
+        f"es_test{cfg.suf_oxf}",
+        f"flag_comentario{cfg.suf_oxf}",
+        "discrepancia_fraude_test",
         f"Fecha_de_Venta{cfg.suf_oxf}",
 
         "diff_monto",
