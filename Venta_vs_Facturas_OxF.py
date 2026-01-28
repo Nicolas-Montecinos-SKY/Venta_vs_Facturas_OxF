@@ -474,6 +474,59 @@ def normalizar_status_emision(df_union: pd.DataFrame, cfg: Config) -> pd.DataFra
     return df
 
 
+def agregar_discrepancia_fraude_test(df_union: pd.DataFrame, cfg: Config) -> pd.DataFrame:
+    df = df_union.copy()
+
+    col_status = f"Status Emisión{cfg.suf_oxf}"
+    col_fraude = f"es_fraude{cfg.suf_oxf}"
+    col_test = f"es_test{cfg.suf_oxf}"
+
+    if col_status not in df.columns:
+        df["discrepancia_fraude_test"] = "coincidencia normal"
+        return df
+
+    status = normalize_str_series(df[col_status], upper=True)
+    status_fraude = status.str.contains("FRAUDE", na=False)
+    status_test = status.str.contains("TEST", na=False)
+
+    fraude = df.get(col_fraude)
+    test = df.get(col_test)
+
+    fraude = (
+        fraude.infer_objects(copy=False).fillna(False).astype(bool)
+        if fraude is not None
+        else pd.Series(False, index=df.index)
+    )
+    test = (
+        test.infer_objects(copy=False).fillna(False).astype(bool)
+        if test is not None
+        else pd.Series(False, index=df.index)
+    )
+
+    discrepancia_test = test.ne(status_test)
+    discrepancia_fraude = fraude.ne(status_fraude)
+    coincidencia_test = test & status_test
+    coincidencia_fraude = fraude & status_fraude
+
+    df["discrepancia_fraude_test"] = np.select(
+        [
+            discrepancia_test,
+            discrepancia_fraude,
+            coincidencia_test,
+            coincidencia_fraude,
+        ],
+        [
+            "discrepancia en test",
+            "discrepancia en fraude",
+            "coincidencia en test",
+            "coincidencia en fraude",
+        ],
+        default="coincidencia normal",
+    )
+
+    return df
+
+
 def agregar_fecha_consolidada(df_union: pd.DataFrame, cfg: Config) -> pd.DataFrame:
     df = df_union.copy()
 
@@ -583,6 +636,10 @@ def ordenar_columnas_df_union(df_union: pd.DataFrame, cfg: Config) -> pd.DataFra
         f"Folio_final{cfg.suf_oxf}",
         f"Status Emisión{cfg.suf_oxf}",
         f"Status Emisión_NORMALIZADO{cfg.suf_oxf}",
+        f"es_fraude{cfg.suf_oxf}",
+        f"es_test{cfg.suf_oxf}",
+        f"flag_comentario{cfg.suf_oxf}",
+        "discrepancia_fraude_test",
         f"Fecha_de_Venta{cfg.suf_oxf}",
 
         "diff_monto",
@@ -656,6 +713,7 @@ def ejecutar_conciliacion(
     df_union = add_conciliation(df_union, cfg)
     df_union = unificar_columnas_reserva_ticket(df_union, cfg)
     df_union = normalizar_status_emision(df_union, cfg)
+    df_union = agregar_discrepancia_fraude_test(df_union, cfg)
     df_union = agregar_usd_unificado(df_union, tc, cfg)
     df_union = agregar_fecha_consolidada(df_union, cfg)
     df_union = ordenar_columnas_df_union(df_union, cfg)
