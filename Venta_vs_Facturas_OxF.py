@@ -46,6 +46,11 @@ def require_columns(df: pd.DataFrame, required: list[str], df_name: str) -> None
         raise KeyError(f"[{df_name}] Faltan columnas requeridas: {missing}")
 
 
+def normalize_str_series(series: pd.Series, *, upper: bool = False) -> pd.Series:
+    cleaned = series.astype(str).str.strip()
+    return cleaned.str.upper() if upper else cleaned
+
+
 def coalesce(s1: pd.Series | None, s2: pd.Series | None) -> pd.Series:
     if s1 is None and s2 is None:
         return pd.Series(dtype="object")
@@ -66,10 +71,12 @@ def add_suffix_except(df: pd.DataFrame, suffix: str, keep: tuple[str, ...] = ("I
 # ============================================================
 def _tk_pick(fn, **kwargs) -> str:
     root = tk.Tk()
-    root.withdraw()
-    root.attributes("-topmost", True)
-    out = fn(**kwargs)
-    root.destroy()
+    try:
+        root.withdraw()
+        root.attributes("-topmost", True)
+        out = fn(**kwargs)
+    finally:
+        root.destroy()
     if not out:
         raise RuntimeError("Selección cancelada.")
     return out
@@ -111,9 +118,9 @@ def cargar_tabla_tc(path_tc: str, cfg: Config) -> pd.DataFrame:
 
     tc = tc.copy()
     tc["DATE"] = pd.to_datetime(tc["DATE"], dayfirst=True, errors="coerce").dt.date
-    tc["FROM_CURRENCY"] = tc["FROM_CURRENCY"].astype(str).str.strip().str.upper()
-    tc["TO_CURRENCY"] = tc["TO_CURRENCY"].astype(str).str.strip().str.upper()
-    tc["CONVERSION_TYPE"] = tc["CONVERSION_TYPE"].astype(str).str.strip()
+    tc["FROM_CURRENCY"] = normalize_str_series(tc["FROM_CURRENCY"], upper=True)
+    tc["TO_CURRENCY"] = normalize_str_series(tc["TO_CURRENCY"], upper=True)
+    tc["CONVERSION_TYPE"] = normalize_str_series(tc["CONVERSION_TYPE"])
     tc["CONVERSION_RATE"] = pd.to_numeric(tc["CONVERSION_RATE"], errors="coerce")
 
     tc = tc[
@@ -137,7 +144,9 @@ def consolidar_excels_en_df(
     dtype: dict | None = None,
 ) -> pd.DataFrame:
     carpeta_path = Path(carpeta)
-    archivos = [p for p in carpeta_path.rglob("*") if p.suffix.lower() in extensiones and "~$" not in p.name]
+    archivos = sorted(
+        [p for p in carpeta_path.rglob("*") if p.suffix.lower() in extensiones and "~$" not in p.name]
+    )
     if not archivos:
         raise FileNotFoundError(f"No se encontraron archivos Excel en: {carpeta}")
 
@@ -186,11 +195,11 @@ def prepare_ra(df_ra_raw: pd.DataFrame) -> pd.DataFrame:
     ra = df_ra_raw[cols].copy()
 
     # Filtros negocio
-    ra = ra[ra["method_of_payment"].astype(str).str.strip().str.upper().ne("IN")].copy()
-    ra = ra[ra["station_name"].astype(str).str.strip().str.upper().ne("TRAVELFUSION")].copy()
+    ra = ra[normalize_str_series(ra["method_of_payment"], upper=True).ne("IN")].copy()
+    ra = ra[normalize_str_series(ra["station_name"], upper=True).ne("TRAVELFUSION")].copy()
 
     # ID
-    ra["ID"] = ra["pnr"].astype(str).str.strip() + "_" + ra["document_nbr"].astype(str).str.strip()
+    ra["ID"] = normalize_str_series(ra["pnr"]) + "_" + normalize_str_series(ra["document_nbr"])
 
     # Normalizaciones
     ra["original_currency"] = (
@@ -218,7 +227,7 @@ def prepare_oxf(df_oxf_raw: pd.DataFrame, cfg: Config) -> pd.DataFrame:
     tmp = df_oxf_raw[cols].copy()
 
     # ID (✅ faltaba en tu script)
-    tmp["ID"] = tmp["Reserva"].astype(str).str.strip() + "_" + tmp["N_de_Boleto"].astype(str).str.strip()
+    tmp["ID"] = normalize_str_series(tmp["Reserva"]) + "_" + normalize_str_series(tmp["N_de_Boleto"])
 
     # Folios (✅ faltaba crear Folio_final)
     tmp["Folio"] = pd.to_numeric(tmp["Folio"], errors="coerce").astype("Int64")
@@ -233,7 +242,7 @@ def prepare_oxf(df_oxf_raw: pd.DataFrame, cfg: Config) -> pd.DataFrame:
     tmp["Fecha_de_Venta"] = pd.to_datetime(tmp["Fecha_de_Venta"], errors="coerce")
 
     # Flags FRAUDE / TEST
-    coment = tmp["Comentario real"].astype(str)
+    coment = normalize_str_series(tmp["Comentario real"])
     tmp["es_fraude"] = coment.str.contains(cfg.patron_fraude, case=False, na=False)
     tmp["es_test"] = coment.str.contains(cfg.patron_test, case=False, na=False)
 
@@ -338,8 +347,8 @@ def unificar_columnas_reserva_ticket(df_union: pd.DataFrame, cfg: Config) -> pd.
     ticket  = coalesce(df.get(col_doc_ra), df.get(col_doc_oxf))
 
     # 🔹 Limpieza segura de strings (Series → .str.strip())
-    df["Código de Reserva"] = reserva.astype(str).str.strip()
-    df["Número de Ticket"]  = ticket.astype(str).str.strip()
+    df["Código de Reserva"] = normalize_str_series(reserva)
+    df["Número de Ticket"] = normalize_str_series(ticket)
 
     # 🔹 Normalizar vacíos
     df["Código de Reserva"] = df["Código de Reserva"].replace(
@@ -374,7 +383,7 @@ def normalizar_status_emision(df_union: pd.DataFrame, cfg: Config) -> pd.DataFra
     if col_status not in df.columns:
         return df
 
-    s = df[col_status].astype(str).str.strip()
+    s = normalize_str_series(df[col_status])
 
     fraude = df.get(col_fraude)
     test = df.get(col_test)
@@ -430,14 +439,14 @@ def agregar_usd_unificado(df_union: pd.DataFrame, tc: pd.DataFrame, cfg: Config)
     df[col_monto_oxf] = pd.to_numeric(df.get(col_monto_oxf), errors="coerce")
 
     moneda = df.get(col_moneda_oxf)
-    moneda = moneda.astype(str).str.strip().str.upper() if moneda is not None else pd.Series([None]*len(df), index=df.index)
+    moneda = normalize_str_series(moneda, upper=True) if moneda is not None else pd.Series([None] * len(df), index=df.index)
 
     fecha = df.get(col_fecha_oxf)
     fecha = pd.to_datetime(fecha, errors="coerce").dt.date if fecha is not None else pd.Series([None]*len(df), index=df.index)
 
     tc2 = tc.copy()
     tc2["DATE"] = pd.to_datetime(tc2["DATE"], errors="coerce").dt.date
-    tc2["TO_CURRENCY"] = tc2["TO_CURRENCY"].astype(str).str.strip().str.upper()
+    tc2["TO_CURRENCY"] = normalize_str_series(tc2["TO_CURRENCY"], upper=True)
     tc2["CONVERSION_RATE"] = pd.to_numeric(tc2["CONVERSION_RATE"], errors="coerce")
 
     rate_exact = tc2.set_index(["DATE", "TO_CURRENCY"])["CONVERSION_RATE"]
@@ -529,76 +538,66 @@ def ordenar_columnas_df_union(df_union: pd.DataFrame, cfg: Config) -> pd.DataFra
     return df_union[cols_orden].copy()
 
 
+def ejecutar_conciliacion(cfg: Config) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    carpeta_ra = seleccionar_carpeta("Selecciona la carpeta con los Excel de RA (SABRE)")
+    archivo_oxf = seleccionar_archivo_excel("Selecciona el archivo Excel de OxF (Base)")
+    archivo_tc = seleccionar_archivo_tc("Selecciona el archivo de Tipo de Cambio (TC)")
 
-# %% [markdown]
-# ## Ejecutar
+    df_ra_raw = consolidar_excels_en_df(
+        carpeta_ra,
+        sheet_name=cfg.sheet_ra,
+        dtype={"document_nbr": str, "pnr": str},
+    )
 
-# %%
-# ============================================================
-# 9) Ejecución
-# ============================================================
-carpeta_ra = seleccionar_carpeta("Selecciona la carpeta con los Excel de RA (SABRE)")
-archivo_oxf = seleccionar_archivo_excel("Selecciona el archivo Excel de OxF (Base)")
-archivo_tc = seleccionar_archivo_tc("Selecciona el archivo de Tipo de Cambio (TC)")
+    df_oxf_raw = pd.read_excel(
+        archivo_oxf,
+        sheet_name=cfg.sheet_oxf,
+        dtype={"N_de_Boleto": str, "Reserva": str},
+    )
 
-df_RA_raw = consolidar_excels_en_df(
-    carpeta_ra,
-    sheet_name=CFG.sheet_ra,
-    dtype={"document_nbr": str, "pnr": str},
-)
+    tc = cargar_tabla_tc(archivo_tc, cfg)
+    print("RAW shapes:", df_ra_raw.shape, df_oxf_raw.shape)
 
-df_OxF_raw = pd.read_excel(
-    archivo_oxf,
-    sheet_name=CFG.sheet_oxf,
-    dtype={"N_de_Boleto": str, "Reserva": str},
-)
+    ra = prepare_ra(df_ra_raw)
+    oxf = prepare_oxf(df_oxf_raw, cfg)
+    print("Prepared shapes:", ra.shape, oxf.shape)
 
-tc = cargar_tabla_tc(archivo_tc, CFG)
+    df_union = merge_sources(ra, oxf, cfg)
+    df_union = add_conciliation(df_union, cfg)
+    df_union = unificar_columnas_reserva_ticket(df_union, cfg)
+    df_union = normalizar_status_emision(df_union, cfg)
+    df_union = agregar_usd_unificado(df_union, tc, cfg)
+    df_union = agregar_fecha_consolidada(df_union, cfg)
+    df_union = ordenar_columnas_df_union(df_union, cfg)
 
-print("RAW shapes:", df_RA_raw.shape, df_OxF_raw.shape)
-
-
-
-# %%
-ra = prepare_ra(df_RA_raw)
-oxf = prepare_oxf(df_OxF_raw, CFG)
-
-print("Prepared shapes:", ra.shape, oxf.shape)
+    return df_union, ra, oxf
 
 
-# %%
-df_union = merge_sources(ra, oxf, CFG)
-df_union = add_conciliation(df_union, CFG)
+def exportar_resultados(df_union: pd.DataFrame, out_dir: Path, base_name: str) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-df_union = unificar_columnas_reserva_ticket(df_union, CFG)
-df_union = normalizar_status_emision(df_union, CFG)
-df_union = agregar_usd_unificado(df_union, tc, CFG)
-df_union = agregar_fecha_consolidada(df_union, CFG)
+    file_consolidado = out_dir / f"{base_name}_CONSOLIDADO.csv"
+    df_union.to_csv(file_consolidado, index=False, encoding="utf-8-sig")
+    print(f"✅ CSV exportado OK: {file_consolidado} | Filas: {len(df_union):,}")
 
-df_union = ordenar_columnas_df_union(df_union, CFG)
+    df_solo_venta = df_union[df_union["origen"] == "Venta sin identificar"].copy()
+    file_venta = out_dir / f"{base_name}_Ventas_no_reconocidas.csv"
+    df_solo_venta.to_csv(file_venta, index=False, encoding="utf-8-sig")
+    print(f"✅ CSV exportado OK: {file_venta} | Filas: {len(df_solo_venta):,}")
 
-# %%
-# Export
-out_dir = Path("Archivos_csv")
-out_dir.mkdir(parents=True, exist_ok=True)
+    df_solo_oxf = df_union[df_union["origen"] == "Factura sin identificar"].copy()
+    file_oxf = out_dir / f"{base_name}_Facturas_no_reconocidas.csv"
+    df_solo_oxf.to_csv(file_oxf, index=False, encoding="utf-8-sig")
+    print(f"✅ CSV exportado OK: {file_oxf} | Filas: {len(df_solo_oxf):,}")
 
-base_name = "Venta_RA_vs_Facturacion_OxF"
 
-file_consolidado = out_dir / f"{base_name}_CONSOLIDADO.csv"
-df_union.to_csv(file_consolidado, index=False, encoding="utf-8-sig")
-print(f"✅ CSV exportado OK: {file_consolidado} | Filas: {len(df_union):,}")
+def main() -> None:
+    df_union, _, _ = ejecutar_conciliacion(CFG)
+    exportar_resultados(df_union, Path("Archivos_csv"), "Venta_RA_vs_Facturacion_OxF")
 
-df_solo_venta = df_union[df_union["origen"] == "Venta sin identificar"].copy()
-file_venta = out_dir / f"{base_name}_Ventas_no_reconocidas.csv"
-df_solo_venta.to_csv(file_venta, index=False, encoding="utf-8-sig")
-print(f"✅ CSV exportado OK: {file_venta} | Filas: {len(df_solo_venta):,}")
 
-df_solo_oxf = df_union[df_union["origen"] == "Factura sin identificar"].copy()
-file_oxf = out_dir / f"{base_name}_Facturas_no_reconocidas.csv"
-df_solo_oxf.to_csv(file_oxf, index=False, encoding="utf-8-sig")
-print(f"✅ CSV exportado OK: {file_oxf} | Filas: {len(df_solo_oxf):,}")
 
-# %%
-df_union.head()
+if __name__ == "__main__":
+    main()
 
 
