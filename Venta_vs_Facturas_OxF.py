@@ -32,6 +32,10 @@ class Config:
     tolerancia_monto: float = 0.01
     tc_from_currency: str = "USD"
     tc_conversion_type: str = "Corporate"
+    cache_dir: Path = Path("cache_inputs")
+    cache_ra: str = "ra_raw.pkl"
+    cache_oxf: str = "oxf_raw.pkl"
+    cache_tc: str = "tc.pkl"
 
 
 CFG = Config()
@@ -64,6 +68,14 @@ def coalesce(s1: pd.Series | None, s2: pd.Series | None) -> pd.Series:
 def add_suffix_except(df: pd.DataFrame, suffix: str, keep: tuple[str, ...] = ("ID",)) -> pd.DataFrame:
     rename_map = {c: f"{c}{suffix}" for c in df.columns if c not in keep}
     return df.rename(columns=rename_map)
+
+
+def _cache_paths(cfg: Config) -> dict[str, Path]:
+    return {
+        "ra": cfg.cache_dir / cfg.cache_ra,
+        "oxf": cfg.cache_dir / cfg.cache_oxf,
+        "tc": cfg.cache_dir / cfg.cache_tc,
+    }
 
 
 # ============================================================
@@ -132,6 +144,27 @@ def cargar_tabla_tc(path_tc: str, cfg: Config) -> pd.DataFrame:
     tc = tc.sort_values(["DATE", "TO_CURRENCY"]).drop_duplicates(["DATE", "TO_CURRENCY"], keep="last")
 
     return tc
+
+
+def guardar_insumos(df_ra_raw: pd.DataFrame, df_oxf_raw: pd.DataFrame, tc: pd.DataFrame, cfg: Config) -> None:
+    cfg.cache_dir.mkdir(parents=True, exist_ok=True)
+    paths = _cache_paths(cfg)
+    df_ra_raw.to_pickle(paths["ra"])
+    df_oxf_raw.to_pickle(paths["oxf"])
+    tc.to_pickle(paths["tc"])
+    print(f"✅ Insumos guardados en: {cfg.cache_dir}")
+
+
+def cargar_insumos(cfg: Config) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    paths = _cache_paths(cfg)
+    faltantes = [name for name, path in paths.items() if not path.exists()]
+    if faltantes:
+        raise FileNotFoundError(f"Faltan archivos cache: {faltantes}. Ruta base: {cfg.cache_dir}")
+    df_ra_raw = pd.read_pickle(paths["ra"])
+    df_oxf_raw = pd.read_pickle(paths["oxf"])
+    tc = pd.read_pickle(paths["tc"])
+    print(f"✅ Insumos cargados desde cache: {cfg.cache_dir}")
+    return df_ra_raw, df_oxf_raw, tc
 
 
 # ============================================================
@@ -524,10 +557,6 @@ def ordenar_columnas_df_union(df_union: pd.DataFrame, cfg: Config) -> pd.DataFra
         f"Status Emisión_NORMALIZADO{cfg.suf_oxf}",
         f"Fecha_de_Venta{cfg.suf_oxf}",
 
-        f"es_fraude{cfg.suf_oxf}",
-        f"es_test{cfg.suf_oxf}",
-        f"flag_comentario{cfg.suf_oxf}",
-
         "diff_monto",
     ]
 
@@ -538,24 +567,42 @@ def ordenar_columnas_df_union(df_union: pd.DataFrame, cfg: Config) -> pd.DataFra
     return df_union[cols_orden].copy()
 
 
-def ejecutar_conciliacion(cfg: Config) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    carpeta_ra = seleccionar_carpeta("Selecciona la carpeta con los Excel de RA (SABRE)")
-    archivo_oxf = seleccionar_archivo_excel("Selecciona el archivo Excel de OxF (Base)")
-    archivo_tc = seleccionar_archivo_tc("Selecciona el archivo de Tipo de Cambio (TC)")
+def ejecutar_conciliacion(
+    cfg: Config,
+    *,
+    use_cache: bool = False,
+    refresh_cache: bool = False,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    if use_cache and not refresh_cache:
+        try:
+            df_ra_raw, df_oxf_raw, tc = cargar_insumos(cfg)
+        except FileNotFoundError:
+            df_ra_raw, df_oxf_raw, tc = None, None, None
+    else:
+        df_ra_raw, df_oxf_raw, tc = None, None, None
 
-    df_ra_raw = consolidar_excels_en_df(
-        carpeta_ra,
-        sheet_name=cfg.sheet_ra,
-        dtype={"document_nbr": str, "pnr": str},
-    )
+    if df_ra_raw is None or df_oxf_raw is None or tc is None:
+        carpeta_ra = seleccionar_carpeta("Selecciona la carpeta con los Excel de RA (SABRE)")
+        archivo_oxf = seleccionar_archivo_excel("Selecciona el archivo Excel de OxF (Base)")
+        archivo_tc = seleccionar_archivo_tc("Selecciona el archivo de Tipo de Cambio (TC)")
 
-    df_oxf_raw = pd.read_excel(
-        archivo_oxf,
-        sheet_name=cfg.sheet_oxf,
-        dtype={"N_de_Boleto": str, "Reserva": str},
-    )
+        df_ra_raw = consolidar_excels_en_df(
+            carpeta_ra,
+            sheet_name=cfg.sheet_ra,
+            dtype={"document_nbr": str, "pnr": str},
+        )
 
-    tc = cargar_tabla_tc(archivo_tc, cfg)
+        df_oxf_raw = pd.read_excel(
+            archivo_oxf,
+            sheet_name=cfg.sheet_oxf,
+            dtype={"N_de_Boleto": str, "Reserva": str},
+        )
+
+        tc = cargar_tabla_tc(archivo_tc, cfg)
+
+        if use_cache or refresh_cache:
+            guardar_insumos(df_ra_raw, df_oxf_raw, tc, cfg)
+
     print("RAW shapes:", df_ra_raw.shape, df_oxf_raw.shape)
 
     ra = prepare_ra(df_ra_raw)
@@ -592,7 +639,9 @@ def exportar_resultados(df_union: pd.DataFrame, out_dir: Path, base_name: str) -
 
 
 def main() -> None:
-    df_union, _, _ = ejecutar_conciliacion(CFG)
+    use_cache = True
+    refresh_cache = False
+    df_union, _, _ = ejecutar_conciliacion(CFG, use_cache=use_cache, refresh_cache=refresh_cache)
     exportar_resultados(df_union, Path("Archivos_csv"), "Venta_RA_vs_Facturacion_OxF")
 
 
