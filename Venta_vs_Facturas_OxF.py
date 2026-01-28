@@ -226,10 +226,22 @@ def prepare_ra(df_ra_raw: pd.DataFrame) -> pd.DataFrame:
     require_columns(df_ra_raw, cols, "RA")
 
     ra = df_ra_raw[cols].copy()
+    rows_inicial = len(ra)
 
     # Filtros negocio
-    ra = ra[normalize_str_series(ra["method_of_payment"], upper=True).ne("IN")].copy()
-    ra = ra[normalize_str_series(ra["station_name"], upper=True).ne("TRAVELFUSION")].copy()
+    filtro_pago = normalize_str_series(ra["method_of_payment"], upper=True).ne("IN")
+    filtro_station = normalize_str_series(ra["station_name"], upper=True).ne("TRAVELFUSION")
+
+    ra = ra[filtro_pago].copy()
+    ra = ra[filtro_station].copy()
+
+    rows_filtrados = len(ra)
+    print(
+        "ℹ️ RA: filtros aplicados | "
+        f"excluidos_por_pago_IN={rows_inicial - filtro_pago.sum():,} | "
+        f"excluidos_por_station_TRAVELFUSION={(~filtro_station).sum():,} | "
+        f"filas_final={rows_filtrados:,}"
+    )
 
     # ID
     ra["ID"] = normalize_str_series(ra["pnr"]) + "_" + normalize_str_series(ra["document_nbr"])
@@ -258,6 +270,7 @@ def prepare_oxf(df_oxf_raw: pd.DataFrame, cfg: Config) -> pd.DataFrame:
     require_columns(df_oxf_raw, cols, "OxF")
 
     tmp = df_oxf_raw[cols].copy()
+    rows_inicial = len(tmp)
 
     # ID (✅ faltaba en tu script)
     tmp["ID"] = normalize_str_series(tmp["Reserva"]) + "_" + normalize_str_series(tmp["N_de_Boleto"])
@@ -305,6 +318,13 @@ def prepare_oxf(df_oxf_raw: pd.DataFrame, cfg: Config) -> pd.DataFrame:
                "flag_comentario": "first",
            })
            .rename(columns={"N_de_Boleto": "document_nbr"})
+    )
+
+    rows_agrupado = len(oxf)
+    print(
+        "ℹ️ OxF: agrupación por ID | "
+        f"filas_raw={rows_inicial:,} -> filas_agrupadas={rows_agrupado:,} | "
+        f"reducción={(rows_inicial - rows_agrupado):,}"
     )
 
     return oxf
@@ -421,8 +441,16 @@ def normalizar_status_emision(df_union: pd.DataFrame, cfg: Config) -> pd.DataFra
     fraude = df.get(col_fraude)
     test = df.get(col_test)
 
-    fraude = (fraude.fillna(False).astype(bool) if fraude is not None else pd.Series(False, index=df.index))
-    test   = (test.fillna(False).astype(bool) if test is not None else pd.Series(False, index=df.index))
+    fraude = (
+        fraude.infer_objects(copy=False).fillna(False).astype(bool)
+        if fraude is not None
+        else pd.Series(False, index=df.index)
+    )
+    test = (
+        test.infer_objects(copy=False).fillna(False).astype(bool)
+        if test is not None
+        else pd.Series(False, index=df.index)
+    )
 
     df[col_out] = np.where(
         fraude & test, "FRAUDE|TEST",
@@ -603,13 +631,28 @@ def ejecutar_conciliacion(
         if use_cache or refresh_cache:
             guardar_insumos(df_ra_raw, df_oxf_raw, tc, cfg)
 
-    print("RAW shapes:", df_ra_raw.shape, df_oxf_raw.shape)
+    print(
+        "ℹ️ Insumos RAW | "
+        f"RA filas={df_ra_raw.shape[0]:,} cols={df_ra_raw.shape[1]} | "
+        f"OxF filas={df_oxf_raw.shape[0]:,} cols={df_oxf_raw.shape[1]}"
+    )
 
     ra = prepare_ra(df_ra_raw)
     oxf = prepare_oxf(df_oxf_raw, cfg)
-    print("Prepared shapes:", ra.shape, oxf.shape)
+    print(
+        "ℹ️ Preparación completada | "
+        f"RA filas={ra.shape[0]:,} cols={ra.shape[1]} | "
+        f"OxF filas={oxf.shape[0]:,} cols={oxf.shape[1]}"
+    )
 
     df_union = merge_sources(ra, oxf, cfg)
+    merge_counts = df_union["_merge"].value_counts(dropna=False)
+    print(
+        "ℹ️ Merge RA vs OxF | "
+        f"both={merge_counts.get('both', 0):,} | "
+        f"left_only={merge_counts.get('left_only', 0):,} | "
+        f"right_only={merge_counts.get('right_only', 0):,}"
+    )
     df_union = add_conciliation(df_union, cfg)
     df_union = unificar_columnas_reserva_ticket(df_union, cfg)
     df_union = normalizar_status_emision(df_union, cfg)
