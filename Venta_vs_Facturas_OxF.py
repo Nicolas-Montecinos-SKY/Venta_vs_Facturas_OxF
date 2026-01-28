@@ -39,6 +39,7 @@ class Config:
     cache_ra: str = "ra_raw.pkl"
     cache_oxf: str = "oxf_raw.pkl"
     cache_tc: str = "tc.pkl"
+    cache_fraude_test: str = "fraude_test.pkl"
 
 
 CFG = Config()
@@ -78,6 +79,7 @@ def _cache_paths(cfg: Config) -> dict[str, Path]:
         "ra": cfg.cache_dir / cfg.cache_ra,
         "oxf": cfg.cache_dir / cfg.cache_oxf,
         "tc": cfg.cache_dir / cfg.cache_tc,
+        "fraude_test": cfg.cache_dir / cfg.cache_fraude_test,
     }
 
 
@@ -230,25 +232,35 @@ def cargar_tabla_tc(path_tc: str, cfg: Config) -> pd.DataFrame:
     return tc
 
 
-def guardar_insumos(df_ra_raw: pd.DataFrame, df_oxf_raw: pd.DataFrame, tc: pd.DataFrame, cfg: Config) -> None:
+def guardar_insumos(
+    df_ra_raw: pd.DataFrame,
+    df_oxf_raw: pd.DataFrame,
+    tc: pd.DataFrame,
+    cfg: Config,
+    df_fraude_test: pd.DataFrame | None = None,
+) -> None:
     cfg.cache_dir.mkdir(parents=True, exist_ok=True)
     paths = _cache_paths(cfg)
     df_ra_raw.to_pickle(paths["ra"])
     df_oxf_raw.to_pickle(paths["oxf"])
     tc.to_pickle(paths["tc"])
+    if df_fraude_test is not None:
+        df_fraude_test.to_pickle(paths["fraude_test"])
     print(f"✅ Insumos guardados en: {cfg.cache_dir}")
 
 
-def cargar_insumos(cfg: Config) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def cargar_insumos(cfg: Config) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame | None]:
     paths = _cache_paths(cfg)
-    faltantes = [name for name, path in paths.items() if not path.exists()]
+    requeridos = ["ra", "oxf", "tc"]
+    faltantes = [name for name in requeridos if not paths[name].exists()]
     if faltantes:
         raise FileNotFoundError(f"Faltan archivos cache: {faltantes}. Ruta base: {cfg.cache_dir}")
     df_ra_raw = pd.read_pickle(paths["ra"])
     df_oxf_raw = pd.read_pickle(paths["oxf"])
     tc = pd.read_pickle(paths["tc"])
+    df_fraude_test = pd.read_pickle(paths["fraude_test"]) if paths["fraude_test"].exists() else None
     print(f"✅ Insumos cargados desde cache: {cfg.cache_dir}")
-    return df_ra_raw, df_oxf_raw, tc
+    return df_ra_raw, df_oxf_raw, tc, df_fraude_test
 
 
 # ============================================================
@@ -772,11 +784,11 @@ def ejecutar_conciliacion(
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     if use_cache and not refresh_cache:
         try:
-            df_ra_raw, df_oxf_raw, tc = cargar_insumos(cfg)
+            df_ra_raw, df_oxf_raw, tc, df_fraude_test = cargar_insumos(cfg)
         except FileNotFoundError:
-            df_ra_raw, df_oxf_raw, tc = None, None, None
+            df_ra_raw, df_oxf_raw, tc, df_fraude_test = None, None, None, None
     else:
-        df_ra_raw, df_oxf_raw, tc = None, None, None
+        df_ra_raw, df_oxf_raw, tc, df_fraude_test = None, None, None, None
 
     if df_ra_raw is None or df_oxf_raw is None or tc is None:
         carpeta_ra = seleccionar_carpeta("Selecciona la carpeta con los Excel de RA (SABRE)")
@@ -796,16 +808,21 @@ def ejecutar_conciliacion(
         )
 
         tc = cargar_tabla_tc(archivo_tc, cfg)
+        if use_fraude_test:
+            carpeta_fraude_test = seleccionar_carpeta(
+                "Selecciona carpeta con subcarpetas FRAUDE y TEST"
+            )
+            df_fraude_test = cargar_documentos_fraude_test(carpeta_fraude_test, cfg)
 
         if use_cache or refresh_cache:
-            guardar_insumos(df_ra_raw, df_oxf_raw, tc, cfg)
-
-    df_fraude_test = None
-    if use_fraude_test:
+            guardar_insumos(df_ra_raw, df_oxf_raw, tc, cfg, df_fraude_test)
+    elif use_fraude_test and df_fraude_test is None:
         carpeta_fraude_test = seleccionar_carpeta(
             "Selecciona carpeta con subcarpetas FRAUDE y TEST"
         )
         df_fraude_test = cargar_documentos_fraude_test(carpeta_fraude_test, cfg)
+        if use_cache or refresh_cache:
+            guardar_insumos(df_ra_raw, df_oxf_raw, tc, cfg, df_fraude_test)
 
     print(
         "ℹ️ Insumos RAW | "
