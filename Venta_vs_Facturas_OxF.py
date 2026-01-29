@@ -602,13 +602,19 @@ def normalizar_status_emision(df_union: pd.DataFrame, cfg: Config) -> pd.DataFra
     return df
 
 
-def comparar_flags_fraude_test(df_union: pd.DataFrame, cfg: Config) -> pd.DataFrame:
+def comparar_flags_fraude_test(
+    df_union: pd.DataFrame,
+    cfg: Config,
+    df_flags: pd.DataFrame | None = None,
+) -> pd.DataFrame:
     df = df_union.copy()
 
     col_ra_fraude = f"es_fraude{cfg.suf_ra}"
     col_ra_test = f"es_test{cfg.suf_ra}"
     col_oxf_fraude = f"es_fraude{cfg.suf_oxf}"
     col_oxf_test = f"es_test{cfg.suf_oxf}"
+    col_ra_doc = f"document_nbr{cfg.suf_ra}"
+    col_oxf_doc = f"document_nbr{cfg.suf_oxf}"
 
     ra_fraude = df.get(col_ra_fraude)
     ra_test = df.get(col_ra_test)
@@ -642,6 +648,40 @@ def comparar_flags_fraude_test(df_union: pd.DataFrame, cfg: Config) -> pd.DataFr
     df["discrepancia_fraude_test"] = np.select(
         [diff_fraude & diff_test, diff_fraude, diff_test],
         ["DISCREPANCIA_FRAUDE|TEST", "DISCREPANCIA_FRAUDE", "DISCREPANCIA_TEST"],
+        default="",
+    )
+    fraude_ticket = pd.Series(False, index=df.index)
+    test_ticket = pd.Series(False, index=df.index)
+    if df_flags is not None and not df_flags.empty:
+        fraude_set = set(
+            normalize_str_series(df_flags.loc[df_flags["es_fraude"], "document_nbr"])
+        )
+        test_set = set(
+            normalize_str_series(df_flags.loc[df_flags["es_test"], "document_nbr"])
+        )
+
+        ticket_coalesce = coalesce(df.get(col_ra_doc), df.get(col_oxf_doc))
+        ticket = normalize_str_series(ticket_coalesce)
+        fraude_ticket = ticket.isin(fraude_set)
+        test_ticket = ticket.isin(test_set)
+
+    df["es_fraude_ticket"] = fraude_ticket
+    df["es_test_ticket"] = test_ticket
+    df["flag_fraude_test_ticket"] = np.select(
+        [fraude_ticket & test_ticket, fraude_ticket, test_ticket],
+        ["FRAUDE|TEST", "FRAUDE", "TEST"],
+        default="",
+    )
+
+    df["es_fraude_consolidado"] = ra_fraude | oxf_fraude | fraude_ticket
+    df["es_test_consolidado"] = ra_test | oxf_test | test_ticket
+    df["flag_fraude_test_consolidado"] = np.select(
+        [
+            df["es_fraude_consolidado"] & df["es_test_consolidado"],
+            df["es_fraude_consolidado"],
+            df["es_test_consolidado"],
+        ],
+        ["FRAUDE|TEST", "FRAUDE", "TEST"],
         default="",
     )
     return df
@@ -754,6 +794,12 @@ def ordenar_columnas_df_union(df_union: pd.DataFrame, cfg: Config) -> pd.DataFra
         f"es_test{cfg.suf_oxf}",
         f"flag_comentario{cfg.suf_oxf}",
         "discrepancia_fraude_test",
+        "es_fraude_ticket",
+        "es_test_ticket",
+        "flag_fraude_test_ticket",
+        "es_fraude_consolidado",
+        "es_test_consolidado",
+        "flag_fraude_test_consolidado",
 
         f"Pasajero{cfg.suf_oxf}",
         f"Monto_ASR{cfg.suf_oxf}",
@@ -763,10 +809,6 @@ def ordenar_columnas_df_union(df_union: pd.DataFrame, cfg: Config) -> pd.DataFra
         f"Folio_final{cfg.suf_oxf}",
         f"Status Emisión{cfg.suf_oxf}",
         f"Status Emisión_NORMALIZADO{cfg.suf_oxf}",
-        f"es_fraude{cfg.suf_oxf}",
-        f"es_test{cfg.suf_oxf}",
-        f"flag_comentario{cfg.suf_oxf}",
-        "discrepancia_fraude_test",
         f"Fecha_de_Venta{cfg.suf_oxf}",
 
         "diff_monto",
@@ -855,7 +897,7 @@ def ejecutar_conciliacion(
     df_union = add_conciliation(df_union, cfg)
     df_union = unificar_columnas_reserva_ticket(df_union, cfg)
     df_union = normalizar_status_emision(df_union, cfg)
-    df_union = comparar_flags_fraude_test(df_union, cfg)
+    df_union = comparar_flags_fraude_test(df_union, cfg, df_fraude_test)
     df_union = agregar_usd_unificado(df_union, tc, cfg)
     df_union = agregar_fecha_consolidada(df_union, cfg)
     df_union = ordenar_columnas_df_union(df_union, cfg)
